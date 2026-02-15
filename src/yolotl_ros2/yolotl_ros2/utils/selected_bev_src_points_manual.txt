@@ -1,0 +1,5 @@
+# Selected BEV Points
+148, 186 # 1 (L-Bot)
+514, 179 # 2 (R-Bot)
+189, 80 # 3 (L-Top)
+433, 70 # 4 (R-Top)

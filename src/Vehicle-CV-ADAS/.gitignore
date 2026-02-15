@@ -1,0 +1,9 @@
+*.pyc
+*.onnx
+*.trt
+
+
+TrafficLaneDetector/temp/*.mp4
+TrafficLaneDetector/temp/pic/*.jpg
+TrafficLaneDetector/temp/pic/*.png
+ObjectDetector/temp/*.avi
