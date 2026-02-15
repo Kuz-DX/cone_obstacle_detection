@@ -125,7 +125,7 @@ class LaneFollowerNode(Node):
         self.pub_steering = self.create_publisher(Float32, 'auto_steer_angle_lane', 1)
         self.pub_lane_status = self.create_publisher(Bool, 'lane_detection_status', 1)
         self.pub_path = self.create_publisher(Path, 'lane_path', 10)
-        self.pub_drivable_area = self.create_publisher(Image, 'drivable_area', 10)
+        self.pub_drivable_area = self.create_publisher(CompressedImage, 'drivable_area', 10)
         
         # [통신] QoS 설정 적용 (카메라 연결 문제 해결)
         if 'compressed' in self.opt.topic:
@@ -427,16 +427,13 @@ class LaneFollowerNode(Node):
         original_with_lanes = self.draw_lanes_on_original(im0s, final_left_coeff, final_right_coeff, self.tracked_center_path['coeff'])
         
         # [Publish] 주행 가능 영역 이미지 발행
-        if self.pub_drivable_area.get_subscription_count() > 0:
-            msg = Image()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = "base_link"
-            msg.height = original_with_lanes.shape[0]
-            msg.width = original_with_lanes.shape[1]
-            msg.encoding = "bgr8"
-            msg.is_bigendian = 0
-            msg.step = original_with_lanes.shape[1] * 3
-            msg.data = original_with_lanes.tobytes()
+        msg = CompressedImage()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "base_link"
+        msg.format = "jpeg"
+        success, encoded_img = cv2.imencode('.jpg', original_with_lanes)
+        if success:
+            msg.data = encoded_img.tobytes()
             self.pub_drivable_area.publish(msg)
 
         cv2.imshow("Original Camera View", original_with_lanes)
