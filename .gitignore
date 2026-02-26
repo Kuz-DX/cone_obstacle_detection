@@ -4,4 +4,4 @@ build/
 bag/
 install/
 log/
-.dynamic/
+.venv/

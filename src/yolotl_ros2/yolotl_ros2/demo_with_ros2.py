@@ -5,12 +5,7 @@ import sys
 import os
 import glob
 
-# [1] Conda 환경 라이브러리 경로 우선순위 설정 (NumPy 충돌 방지)
-if 'CONDA_PREFIX' in os.environ:
-    conda_site = glob.glob(os.path.join(os.environ['CONDA_PREFIX'], 'lib', 'python*', 'site-packages'))
-    if conda_site: 
-        sys.path.insert(0, conda_site[0])
-        print(f"[System] Conda path added: {conda_site[0]}")
+
 
 import numpy as np
 import cv2
@@ -120,6 +115,12 @@ class LaneFollowerNode(Node):
         self.THROTTLE_MIN, self.THROTTLE_MAX = 0.4, 0.6
         self.MIN_LOOKAHEAD_DISTANCE, self.MAX_LOOKAHEAD_DISTANCE = 1.75, 2.35
         self.current_throttle = self.THROTTLE_MIN
+
+        # [디벨롭 적용] 동적 LD 및 조향각 제한 관련 파라미터
+        self.MIN_LOOKAHEAD_DISTANCE = 1.0  # 최대 커브 시 사용할 최소 LD
+        self.MAX_LOOKAHEAD_DISTANCE = 2.0  # 직진 시 사용할 최대 LD
+        self.MAX_STEER_DEG = 25.0          # 최대 조향각 제한 (도 단위)
+        self.prev_steer_deg = 0.0          # 이전 프레임 조향각 저장 변수
 
         # 4. ROS Setup
         self.pub_steering = self.create_publisher(Float32, 'auto_steer_angle_lane', 1)
@@ -384,20 +385,49 @@ class LaneFollowerNode(Node):
                     path_msg.poses.append(pose)
                 self.pub_path.publish(path_msg)
 
-                throttle_range = self.THROTTLE_MAX - self.THROTTLE_MIN
-                normalized_throttle = (self.current_throttle - self.THROTTLE_MIN) / throttle_range if throttle_range > 0 else 0.0
-                dynamic_lookahead_distance = self.MIN_LOOKAHEAD_DISTANCE + (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * normalized_throttle
+                # throttle_range = self.THROTTLE_MAX - self.THROTTLE_MIN
+                # normalized_throttle = (self.current_throttle - self.THROTTLE_MIN) / throttle_range if throttle_range > 0 else 0.0
+                # dynamic_lookahead_distance = self.MIN_LOOKAHEAD_DISTANCE + (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * normalized_throttle
+                
+                # for y_bev in range(self.bev_h - 1, -1, -1):
+                #     x_bev = np.polyval(final_center_coeff, y_bev)
+                #     x_veh, y_veh_right = self.image_to_vehicle((x_bev, y_bev))
+                #     dist = sqrt(x_veh**2 + y_veh_right**2)
+                #     if dist >= dynamic_lookahead_distance:
+                #         goal_point_bev = (int(x_bev), int(y_bev))
+                #         steer_rad = atan2(2.0 * self.L * y_veh_right, x_veh**2 + y_veh_right**2)
+                #         steer_deg = np.clip(-degrees(steer_rad), -25.0, 25.0)
+                #         self.pub_steering.publish(Float32(data=steer_deg))
+                #         break
+                
+                
+                # ====================================================================
+                # [디벨롭 적용 완료] 이전 프레임 조향각에 따른 동적 LD 계산 로직
+                # ====================================================================
+                # 1. 이전 프레임 조향각 절댓값을 0.0(직진) ~ 1.0(최대 조향) 비율로 변환
+                normalized_steer = min(abs(self.prev_steer_deg) / self.MAX_STEER_DEG, 1.0)
+                
+                # 2. 직진일수록(0.0) 멀리 보고(MAX), 조향각이 클수록(1.0) 짧게 봄(MIN)
+                dynamic_lookahead_distance = self.MAX_LOOKAHEAD_DISTANCE - (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * normalized_steer
                 
                 for y_bev in range(self.bev_h - 1, -1, -1):
                     x_bev = np.polyval(final_center_coeff, y_bev)
                     x_veh, y_veh_right = self.image_to_vehicle((x_bev, y_bev))
                     dist = sqrt(x_veh**2 + y_veh_right**2)
+                    
                     if dist >= dynamic_lookahead_distance:
                         goal_point_bev = (int(x_bev), int(y_bev))
                         steer_rad = atan2(2.0 * self.L * y_veh_right, x_veh**2 + y_veh_right**2)
-                        steer_deg = np.clip(-degrees(steer_rad), -25.0, 25.0)
+                        
+                        # [제한 추가] 최대 조향각 25도로 제한 (클리핑)
+                        steer_deg = np.clip(-degrees(steer_rad), -self.MAX_STEER_DEG, self.MAX_STEER_DEG)
+                        
+                        # [핵심] 다음 프레임 LD 계산을 위해 현재 조향각 기억
+                        self.prev_steer_deg = steer_deg
+                        
                         self.pub_steering.publish(Float32(data=steer_deg))
                         break
+
 
         # 7. Visualization
         try:
@@ -413,9 +443,34 @@ class LaneFollowerNode(Node):
         if goal_point_bev is not None:
             cv2.circle(bev_im_for_drawing, goal_point_bev, 10, (0, 255, 255), -1)
 
+        # ====================================================================
+        # [디벨롭 적용 완료] LD 반경 시각화 (BEV 화면 밖 실제 차량 위치 기준 타원)
+        # ====================================================================
+        if lane_detected_bool:
+            # 1. 실제 차량의 기준점은 화면 맨 아래보다 y_offset_m 만큼 뒤에 있음
+            y_offset_px = int(self.y_offset_m / self.m_per_pixel_y)
+            true_origin_pt = (int(self.bev_w / 2), self.bev_h - 1 + y_offset_px)
+            
+            # 2. X축과 Y축의 픽셀 스케일이 다르므로 타원(Ellipse)으로 계산해야 교차함
+            radius_x_px = int(dynamic_lookahead_distance / self.m_per_pixel_x)
+            radius_y_px = int(dynamic_lookahead_distance / self.m_per_pixel_y)
+            
+            # 3. 조향에 따라 크기가 변하는 하얀색 타원 궤적 시각화
+            cv2.ellipse(bev_im_for_drawing, true_origin_pt, (radius_x_px, radius_y_px), 0, 0, 360, (255, 255, 255), 2)
+
+        
+        
+        
         steer_text = f"Steer: {steer_deg:.1f} deg" if steer_deg is not None else "Steer: N/A"
         cv2.putText(bev_im_for_drawing, steer_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(bev_im_for_drawing, f"Lane Detected: {lane_detected_bool}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        
+        # Lookahead 텍스트도 동적으로 바뀐 수치를 바로 표시하도록 수정
+        cv2.putText(bev_im_for_drawing, f"Lookahead: {dynamic_lookahead_distance:.2f}m", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(bev_im_for_drawing, f"Throttle: {self.current_throttle:.2f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+        
+        
         
         throttle_range = self.THROTTLE_MAX - self.THROTTLE_MIN
         norm_thr = (self.current_throttle - self.THROTTLE_MIN) / throttle_range if throttle_range > 0 else 0.0

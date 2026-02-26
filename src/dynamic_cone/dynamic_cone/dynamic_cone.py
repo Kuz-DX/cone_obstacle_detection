@@ -16,6 +16,8 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, CompressedImage
 from nav_msgs.msg import Path
+from std_msgs.msg import Float32
+from rclpy.duration import Duration
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -110,6 +112,10 @@ class ConeDetectionNode(Node):
 
         # 결과 이미지 퍼블리셔
         self.pub_result = self.create_publisher(CompressedImage, '/cone_detection/compressed', 10)
+
+        # [추가] Throttle 제어 퍼블리셔 및 Emergency 상태 변수
+        self.pub_throttle = self.create_publisher(Float32, '/emergency_throttle', 1)
+        self.emergency_end_time = self.get_clock().now()
 
         # 이미지 Subscriber 설정
         if 'compressed' in self.topic_name:
@@ -214,8 +220,13 @@ class ConeDetectionNode(Node):
                 cv2.putText(annotated_frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
             # [추가] 장애물(콘)이 2개 이상이면 EMERGENCY 표시 (크고 굵게)
+            now = self.get_clock().now()
             if obstacle_count >= 2:
-                cv2.putText(annotated_frame, "EMERGENCY", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 2.5, (0, 0, 255), 6)
+                self.emergency_end_time = now + Duration(seconds=1.0)
+
+            if now < self.emergency_end_time:
+                cv2.putText(annotated_frame, "EMERGENCY", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                self.pub_throttle.publish(Float32(data=0.0))
 
             # Lane Path 오버레이
             if self.latest_path is not None and self.M_inv is not None:
